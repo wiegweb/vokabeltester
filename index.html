@@ -11653,7 +11653,7 @@ function renderAnalysisTable() {
 var scannerStream = null, scanTick = null, scanEpoch = 0, qrParts = Object.create(null), gradeDraft = null;
 var DEFAULT_GRADES = [11/12*100,9/12*100,7/12*100,5/12*100,0.000001];
 function tip(text) { return '<details class="tip"><summary aria-label="Erklärung anzeigen">i</summary><p>'+esc(text)+'</p></details>'; }
-function nav(active) { return '<nav class="nav noprint" aria-label="Hauptnavigation"><span class="brand">Wortprobe <span class="badge">5</span></span>'+[['','Tests'],['a','Empfangen'],['settings','Einrichtung']].map(function(x){return '<a class="'+(active===x[0]?'active':'')+'" href="#'+x[0]+'">'+x[1]+'</a>';}).join('')+'</nav>'; }
+function nav(active) { return '<nav class="nav noprint" aria-label="Hauptnavigation"><span class="brand">Vokabeltester <span class="badge">5</span></span>'+[['','Tests'],['a','Empfangen'],['settings','Einrichtung']].map(function(x){return '<a class="'+(active===x[0]?'active':'')+'" href="#'+x[0]+'">'+x[1]+'</a>';}).join('')+'</nav>'; }
 function methodName(m) { return {google:'Google Sheets',airdrop:'AirDrop / Teilen',qr:'QR-Code'}[m] || 'QR-Code'; }
 function getTransport() { var x=lsGet('vt_transfer',null); return x || {primary:lsGet(LS.ep,'')?'google':'airdrop',fallback:'qr'}; }
 function transportOf(t) { return t.transfer || {primary:t.ep?'google':'airdrop',fallback:'qr'}; }
