@@ -1,0 +1,5 @@
+{
+  "hinweis": "Einstellungen des Vokabeltests. Liegt im selben Ordner wie index.html. Wird unter „Einrichtung“ erzeugt – nicht von Hand ändern.",
+  "endpoint": "https://script.google.com/macros/s/AKfycbzjPNQnCQUOs0tmdueRgv0LFZFDGcUcEi9kP6t9bRPKgddPhKVn6gYpNv9HVNnevPZbOw/exec",
+  "directory": {}
+}
