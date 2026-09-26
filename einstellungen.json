@@ -1,0 +1,4 @@
+{
+  "hinweis": "Einstellungen des Vokabeltests. Liegt im selben Ordner wie index.html. Wird unter „Einrichtung“ erzeugt – nicht von Hand ändern.",
+  "endpoint": "https://wiegweb.alwaysdata.net/api.php"
+}
