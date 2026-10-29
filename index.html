@@ -352,7 +352,7 @@ input[type=text],input[type=number],input[type=url],textarea,select{border-radiu
 .beamer-qr{margin:0;text-align:center}.beamer-qr-box img{width:min(34vh,340px)!important;height:auto!important;image-rendering:pixelated}.beamer-qr figcaption{color:var(--ink-2);font-size:clamp(.9rem,1.6vw,1.2rem);margin-top:.6rem}
 #setup.card>h2:first-child{margin-top:0}
 @media print{.beamer{display:none!important}}
-.codeentry{min-height:60vh;display:flex;align-items:center;justify-content:center;padding:32px 0}
+.codeentry{min-height:60vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 0}
 .codeentry-card{max-width:380px;width:100%;text-align:center}
 .codeentry-card .eyebrow{text-align:center}
 .codeentry-form{flex-direction:column;max-width:none;margin-top:1.1rem;gap:.7rem}
@@ -360,6 +360,11 @@ input[type=text],input[type=number],input[type=url],textarea,select{border-radiu
 .codeentry-form button{width:100%;min-height:52px}
 .codeentry-back{margin-top:1.3rem}
 #code-err:empty{display:none}
+/* Hinweis für Lernende: Vorkorrektur, Note, Kürzel – dezent unter der Karte */
+.student-note{margin:16px 0 0;font-size:.8rem;line-height:1.5;color:var(--ink-2)}
+.student-note p{margin:0}.student-note p+p{margin-top:.3rem}.student-note span{display:inline-block}
+.codeentry .student-note{max-width:380px;margin:20px auto 0;text-align:center}
+@media print{.student-note{display:none}}
 /* ===== Farbwelt nach dem Logo: Navy (Visier),Mint/Grün (Haken, Stift),Blaugrau (Zeilen),Rot (Kreuz) ===== */
 
 html{background:var(--paper)}
@@ -10580,6 +10585,8 @@ var LOGO_URI = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCA
 var POLL_MS = 10000;
 
 var LS = { ep: 'vt_endpoint', tests: 'vt_tests', teacher: 'vt_teacher', results: 'vt_results' };
+/* Aufbewahrung: Server (api.php) und Geräte löschen Tests samt Antworten 90 Tage nach dem Anlegen. */
+var KEEP_DAYS = 90, KEEP_MS = KEEP_DAYS * 864e5;
 var APP = null;
 var timer = null;
 var poll = null;
@@ -10668,9 +10675,10 @@ function sortRows(rows, idm) {
     return cmpKennung(a.kennung, b.kennung, idm) || String(a.submittedAt).localeCompare(String(b.submittedAt));
   });
 }
-/* Korrigierter Bogen je Person – nur im PDF, eine Seite pro Person */
+/* Korrigierter Bogen je Person – nur im PDF, jeder Bogen beginnt auf einer neuen Seite */
 
-/* Passt die Schriftgröße jedes Antwortbogens so an, dass er inklusive Unterschriftszeile auf eine Seite passt. */
+/* Passt die Schriftgröße jedes Antwortbogens so an, dass er auf möglichst wenige Seiten passt (meist eine).
+   Die Unterschriftszeile steht immer auf der letzten Seite des Bogens unten rechts, über der Fußzeile. */
 
 /* ===== PDF-Export: eigenes A4-Layout, unabhängig vom Druckdialog des Browsers ===== */
 var PDF_W = 595.28, PDF_H = 841.89, PDF_M = 42.52, PDF_MM = 2.8346;
@@ -10703,8 +10711,10 @@ function pdfStr(s) {
   for (var i = 0; i < s.length; i++) { var ch = String.fromCharCode(pdfCode(s.charAt(i))); out += (ch === '(' || ch === ')' || ch === '\\') ? '\\' + ch : ch; }
   return '(' + out + ')';
 }
-function PdfDoc() { this.pages = []; this.ops = null; }
-PdfDoc.prototype.page = function () { this.ops = []; this.pages.push(this.ops); };
+function PdfDoc() { this.pages = []; this.kinds = []; this.ops = null; }
+PdfDoc.prototype.page = function (kind) { this.ops = []; this.pages.push(this.ops); this.kinds.push(kind || ''); };
+/* Nachträglich auf jeder Seite zeichnen, z. B. die Fußzeile */
+PdfDoc.prototype.eachPage = function (fn) { var self = this; this.pages.forEach(function (ops, i) { self.ops = ops; fn(self.kinds[i], i); }); };
 PdfDoc.prototype.text = function (x, top, str, size, o) {
   o = o || {}; str = String(str);
   var w = pdfWidth(str, size, o.bold) + (o.spacing || 0) * Math.max(0, str.length - 1);
@@ -10732,7 +10742,16 @@ PdfDoc.prototype.bytes = function () {
   for (var i = 0; i < out.length; i++) bytes[i] = out.charCodeAt(i) & 255;
   return bytes;
 };
-/* Tabelle mit Umbruch in Zellen; bricht bei Bedarf auf eine neue Seite um und wiederholt dann den Kopf. */
+/* Höhen von Kopf und Zeilen einer Tabelle – dieselbe Rechnung wie in pdfTable, für die Seitenplanung. */
+function pdfTableMetrics(t) {
+  var cw = PDF_W - 2 * PDF_M, lh = t.size * 1.25, widths = t.cols.map(function (c) { return c.frac * cw; });
+  return { head: t.head * 1.25 + t.pad, rows: t.rows.map(function (row) {
+    var n = Math.max.apply(null, row.map(function (txt, i) { return pdfWrap(txt, t.size, false, widths[i] - 6).length; }));
+    return n * lh + 2 * t.pad;
+  }) };
+}
+/* Tabelle mit Umbruch in Zellen; bricht bei Bedarf auf eine neue Seite um und wiederholt dann den Kopf.
+   Mit t.breaks (Zeilennummer → true) stehen die Seitenumbrüche vorab fest. */
 function pdfTable(doc, t) {
   var x = PDF_M, cw = PDF_W - 2 * PDF_M, lh = t.size * 1.25, top = t.top;
   var widths = t.cols.map(function (c) { return c.frac * cw; });
@@ -10743,9 +10762,9 @@ function pdfTable(doc, t) {
     top += t.head * 1.25 + t.pad; doc.line(x, top, x + cw, top, 1.1, 0.13);
   }
   if (!t.measureOnly) header(); else top += t.head * 1.25 + t.pad;
-  t.rows.forEach(function (row) {
+  t.rows.forEach(function (row, ri) {
     var cells = row.map(cellLines), n = Math.max.apply(null, cells.map(function (l) { return l.length; })), h = n * lh + 2 * t.pad;
-    if (!t.measureOnly && top + h > t.limit) { top = t.newPage(); header(); }
+    if (!t.measureOnly && (t.breaks ? t.breaks[ri] : top + h > t.limit)) { top = t.newPage(); header(); }
     if (!t.measureOnly) {
       var cx = x;
       cells.forEach(function (lines, i) {
@@ -10760,15 +10779,26 @@ function pdfTable(doc, t) {
 }
 function pdfFileName(title) { return 'Auswertung ' + String(title || 'Test').replace(/[\\\/:*?"<>|]+/g, '-').trim() + '.pdf'; }
 function pdfReport(test, rows, confirmed, closedAt) {
-  var doc = new PdfDoc(), L = PDF_M, R = PDF_W - PDF_M, CW = R - L, BOTTOM = PDF_H - PDF_M, top;
+  var doc = new PdfDoc(), L = PDF_M, R = PDF_W - PDF_M, CW = R - L, top;
   var teacher = String(test.teacher || '').replace(/[^A-Za-zÄÖÜäöüß]/g, '');
-  function newPage() { doc.page(); return PDF_M; }
+  function newPage(kind) { doc.page(kind); return PDF_M; }
+  // ---------- Fußzeile auf jeder Seite, 1 cm über dem Papierrand. Alles andere endet mit Abstand darüber.
+  var FOOT_SIZE = 7.5, FOOT_LH = 9.3;
+  function footWrap(sentences) { return sentences.reduce(function (a, s) { return a.concat(pdfWrap(s, FOOT_SIZE, false, CW)); }, []); }
+  var footLines = {
+    sheet: footWrap(['Deine Antworten werden nach festen Regeln vorkorrigiert, nicht von einer KI (automatisierter Vergleich mit Lösung).', 'Zweifelsfälle (Tippfehler o. Ä.) und Note entscheidet deine Lehrkraft.']),
+    overview: footWrap(['Antworten werden nach festen Regeln vorkorrigiert, nicht von einer KI (automatisierter Vergleich mit Lösung).', 'Zweifelsfälle (Tippfehler o. Ä.) und Noten entscheidet die Lehrkraft.'])
+  };
+  var FOOT_TOP = PDF_H - 10 * PDF_MM - Math.max(footLines.sheet.length, footLines.overview.length) * FOOT_LH - 4;
+  var LIMIT = FOOT_TOP - 8;
+  // Unterschriftslinie: fest unten rechts, direkt über der Fußzeile; darüber Platz für Punkte und Note
+  var SIGN = FOOT_TOP - 21, SCORE_BLOCK = 22 + 26 + 4 + 17 + 30;
   // ---------- Seite 1: Übersicht
-  top = newPage();
+  top = newPage('overview');
   pdfWrap(test.title, 18, true, CW).forEach(function (ln) { doc.text(L, top, ln, 18, { bold: true }); top += 18 * 1.2; });
   doc.text(L, top + 2, 'Stand: ' + new Date().toLocaleString('de-DE'), 9, { gray: 0.4 }); top += 18;
   doc.text(L, top, confirmed ? 'Geprüfte Auswertung' : 'Vorläufige Auswertung – noch nicht abschließend geprüft', 11); top += 24;
-  top = pdfTable(doc, { top: top, limit: BOTTOM, size: 10, head: 8.5, pad: 3.5, newPage: newPage,
+  top = pdfTable(doc, { top: top, limit: LIMIT, size: 10, head: 8.5, pad: 3.5, newPage: function () { return newPage('overview'); },
     cols: [{ title: 'Kennung', frac: 0.2 }, { title: 'Punkte', frac: 0.15 }, { title: 'Note', frac: 0.12 }, { title: 'Hinweise', frac: 0.53 }],
     rows: rows.map(function (r) {
       var h = [];
@@ -10776,7 +10806,14 @@ function pdfReport(test, rows, confirmed, closedAt) {
       if (r.count > 1) h.push(r.count + ' Abgaben'); if (r.late) h.push(lateText(r, closedAt)); if (r.leftCount) h.push(r.leftCount + ' Unterbrechung(en)');
       return [r.kennung, pts(r.score) + ' / ' + r.max, String(gradeOf(r.score, r.max, test).n), h.join(' · ')];
     }) });
-  if (top + 160 > BOTTOM) top = newPage(); else top += 22;
+  var max = test.items.length, key = [];
+  for (var gi = 0; gi < 6; gi++) {
+    var p = []; for (var q = 0; q <= max + 1e-9; q += 0.5) if (gradeOf(q, max, test).n === gi + 1) p.push(q);
+    key.push((gi + 1) + ' · ' + (p.length ? pts(p[0]) + (p.length > 1 ? '–' + pts(p[p.length - 1]) : '') : 'nicht erreichbar'));
+  }
+  var keyLines = pdfWrap(key.join('      '), 10, false, CW);
+  // Verteilung und Notenschlüssel bleiben zusammen – genau so viel Platz wie nötig
+  if (top + 22 + 20 + GRADES.length * 15 + 16 + 20 + keyLines.length * 14 > LIMIT) top = newPage('overview'); else top += 22;
   doc.text(L, top, 'Verteilung', 12, { bold: true }); top += 20;
   var counts = GRADES.map(function (g) { return rows.filter(function (r) { return r.grade === g.n; }).length; }), maxB = Math.max.apply(null, counts.concat([1]));
   GRADES.forEach(function (g, i) {
@@ -10785,18 +10822,14 @@ function pdfReport(test, rows, confirmed, closedAt) {
     doc.text(R, top, String(counts[i]), 10, { align: 'right' }); top += 15;
   });
   top += 16; doc.text(L, top, 'Notenschlüssel', 12, { bold: true }); top += 20;
-  var max = test.items.length, key = [];
-  for (var gi = 0; gi < 6; gi++) {
-    var p = []; for (var q = 0; q <= max + 1e-9; q += 0.5) if (gradeOf(q, max, test).n === gi + 1) p.push(q);
-    key.push((gi + 1) + ' · ' + (p.length ? pts(p[0]) + (p.length > 1 ? '–' + pts(p[p.length - 1]) : '') : 'nicht erreichbar'));
-  }
-  pdfWrap(key.join('      '), 10, false, CW).forEach(function (ln) { doc.text(L, top, ln, 10); top += 14; });
-  // ---------- ab Seite 2: ein Bogen je Person, Unterschrift immer unten rechts
-  var SIGN = BOTTOM - 18, SCORE_BLOCK = 22 + 26 + 4 + 17 + 30;
+  keyLines.forEach(function (ln) { doc.text(L, top, ln, 10); top += 14; });
+  // ---------- ab Seite 2: ein Bogen je Person. Punkte, Note und Unterschrift stehen auf der letzten Seite des Bogens,
+  // die Unterschriftslinie immer an derselben Stelle unten rechts und nie ohne Tabellenzeilen darüber.
+  var CONT_TOP = PDF_M + 20, MIN_SCALE = 0.62;
   rows.forEach(function (r) {
     var who = idmOf(test) === 'nr' ? 'Klassenlistennummer ' + r.kennung : r.kennung;
     function head() {
-      var t = newPage();
+      var t = newPage('sheet');
       pdfWrap(test.title, 20, true, CW).forEach(function (ln) { doc.text(L, t, ln, 20, { bold: true }); t += 20 * 1.15; });
       if (teacher) { doc.text(L, t + 3, teacher, 9.5, { gray: 0.35, spacing: 1.2 }); t += 15; }
       t += 20; doc.text(L, t, who, 13, { bold: true }); return t + 13 * 1.3 + 12;
@@ -10804,21 +10837,43 @@ function pdfReport(test, rows, confirmed, closedAt) {
     var cols = [{ title: 'Vokabel', frac: 0.34 }, { title: 'Deine Antwort', frac: 0.28 }, { title: 'Punkte', frac: 0.1, align: 'center' }, { title: 'richtig wäre gewesen', frac: 0.28 }];
     var data = r.items.map(function (it) { return [it.q, it.a || '—', pts(it.p), it.p === 1 ? '' : it.key]; });
     top = head();
-    // größte Schrift suchen, bei der Tabelle, Punkte und Note über die Unterschrift passen
-    var s = 1, lo = 0.62, hi = 1;
-    function height(sc) { return pdfTable(doc, { measureOnly: true, top: top, size: 11 * sc, head: Math.max(7, 9 * sc), pad: 5.5 * sc, cols: cols, rows: data }) - top; }
-    if (top + height(1) > SIGN - SCORE_BLOCK) {
-      for (var i = 0; i < 8; i++) { var mid = (lo + hi) / 2; if (top + height(mid) > SIGN - SCORE_BLOCK) hi = mid; else lo = mid; }
-      s = lo;
+    var first = top;
+    // Seitenplan für eine Schriftgröße: wo die Tabelle umbricht und wie viele Seiten der Bogen braucht.
+    // Passt der Punkteblock nicht mehr unter die letzte Zeile, wandern die letzten Zeilen mit auf die neue Seite.
+    function plan(sc) {
+      var m = pdfTableMetrics({ size: 11 * sc, head: Math.max(7, 9 * sc), pad: 5.5 * sc, cols: cols, rows: data });
+      var breaks = {}, pages = 1, cur = first + m.head, start = 0, n = m.rows.length;
+      for (var i = 0; i < n; i++) {
+        if (i > start && cur + m.rows[i] > LIMIT) { breaks[i] = true; pages++; cur = CONT_TOP + m.head; start = i; }
+        cur += m.rows[i];
+      }
+      if (cur + SCORE_BLOCK > SIGN) {
+        pages++;
+        if (n - start >= 2) breaks[n - Math.min(3, n - start - 1)] = true;
+      }
+      return { scale: sc, pages: pages, breaks: breaks };
     }
-    var fits = top + height(s) <= SIGN - SCORE_BLOCK;
-    top = pdfTable(doc, { top: top, limit: fits ? SIGN - SCORE_BLOCK : BOTTOM - 10, size: 11 * s, head: Math.max(7, 9 * s), pad: 5.5 * s, cols: cols, rows: data,
-      newPage: function () { var t = newPage(); doc.text(L, t, test.title + ' · ' + who + ' (Fortsetzung)', 9, { gray: 0.4 }); return t + 20; } });
-    if (top + SCORE_BLOCK > SIGN) top = newPage();
+    // größte Schrift, mit der der Bogen auf so wenige Seiten passt wie mit der kleinsten Schrift
+    var target = plan(MIN_SCALE).pages, best = plan(1);
+    if (best.pages > target) {
+      var lo = MIN_SCALE, hi = 1;
+      for (var it = 0; it < 9; it++) { var mid = (lo + hi) / 2; if (plan(mid).pages <= target) lo = mid; else hi = mid; }
+      best = plan(lo);
+    }
+    var s = best.scale;
+    top = pdfTable(doc, { top: top, limit: LIMIT, breaks: best.breaks, size: 11 * s, head: Math.max(7, 9 * s), pad: 5.5 * s, cols: cols, rows: data,
+      newPage: function () { var t = newPage('sheet'); doc.text(L, t, test.title + ' · ' + who + ' (Fortsetzung)', 9, { gray: 0.4 }); return t + 20; } });
+    if (top + SCORE_BLOCK > SIGN) top = newPage('sheet');
     top += 22; doc.text(PDF_W / 2, top, pts(r.score) + ' / ' + r.max + ' Punkten', 20, { bold: true, align: 'center' });
     top += 30; doc.text(PDF_W / 2, top, gradeText(r.score, r.max, test), 13, { align: 'center' });
     doc.line(R - 62 * PDF_MM, SIGN, R, SIGN, 0.8, 0.13);
     doc.text(R - 31 * PDF_MM, SIGN + 4, 'Datum, Unterschrift', 8.5, { gray: 0.35, align: 'center' });
+  });
+  // ---------- Fußzeile: kurzer Strich links, darunter der Hinweis zur Vorkorrektur
+  doc.eachPage(function (kind) {
+    var lines = footLines[kind] || footLines.sheet;
+    doc.line(L, FOOT_TOP, L + 25 * PDF_MM, FOOT_TOP, 0.5, 0.6);
+    lines.forEach(function (ln, i) { doc.text(L, FOOT_TOP + 4 + i * FOOT_LH, ln, FOOT_SIZE, { gray: 0.4 }); });
   });
   return doc.bytes();
 }
@@ -10979,12 +11034,15 @@ var PHP_CODE = String.raw`<?php
  * Sie legt ihre Datenbank beim ersten Aufruf selbst an – im Ordner „vokabeltest-daten“ neben
  * dem Webordner, also nicht öffentlich abrufbar. Einstellungen sind nicht nötig.
  * Neue Fassung: einfach diese Datei ersetzen. Die Daten bleiben erhalten.
+ * Tests und Antworten werden 90 Tage nach dem Anlegen automatisch gelöscht (KEEP_DAYS).
  */
 
 error_reporting(E_ALL);
 ini_set('display_errors', '0');
 
-const VT_VERSION = 3;
+const VT_VERSION = 4;
+const KEEP_DAYS = 90;
+const TIDY_EVERY = 3600;
 const MAX_TESTS_PER_HOUR = 60;
 const MAX_ITEMS = 300;
 const MAX_ROSTER = 60;
@@ -11107,11 +11165,47 @@ function db()
   ]);
   $pdo->exec('PRAGMA busy_timeout = 10000');
   $pdo->exec('PRAGMA journal_mode = WAL');
+  $pdo->exec('PRAGMA secure_delete = ON');
   $pdo->exec("CREATE TABLE IF NOT EXISTS tests (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, token_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', title TEXT NOT NULL, test_json TEXT NOT NULL, created_at INTEGER NOT NULL)");
   $pdo->exec("CREATE TABLE IF NOT EXISTS results (test_id TEXT NOT NULL, submission_id TEXT NOT NULL, kennung TEXT NOT NULL, submitted_at INTEGER NOT NULL, started_at TEXT NOT NULL, duration_sec INTEGER NOT NULL, auto TEXT NOT NULL, late INTEGER NOT NULL, left_count INTEGER NOT NULL, left_text TEXT NOT NULL, answers_json TEXT NOT NULL, PRIMARY KEY (test_id, submission_id))");
   $pdo->exec('CREATE INDEX IF NOT EXISTS results_by_test ON results (test_id)');
   $pdo->exec('CREATE TABLE IF NOT EXISTS joins (test_id TEXT NOT NULL, kennung TEXT NOT NULL, joined_at INTEGER NOT NULL, PRIMARY KEY (test_id, kennung))');
+  $pdo->exec('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL)');
   return $pdo;
+}
+
+/* Löscht Tests samt Antworten KEEP_DAYS Tage nach dem Anlegen – höchstens einmal pro Stunde geprüft.
+   Läuft bei jeder Anfrage mit; ein Fehler hier hält die eigentliche Anfrage nie auf. */
+function tidy()
+{
+  try {
+    $now = time();
+    $last = one('SELECT v FROM meta WHERE k = ?', ['tidy_at']);
+    if ($last && $now - (int) $last['v'] < TIDY_EVERY) {
+      return;
+    }
+    run('INSERT OR IGNORE INTO meta (k, v) VALUES (?, 0)', ['tidy_at']);
+    if (run('UPDATE meta SET v = ? WHERE k = ? AND v <= ?', [$now, 'tidy_at', $now - TIDY_EVERY]) !== 1) {
+      return;
+    }
+    $limit = $now - KEEP_DAYS * 86400;
+    $pdo = db();
+    $pdo->beginTransaction();
+    run('DELETE FROM results WHERE test_id IN (SELECT id FROM tests WHERE created_at < ?) OR test_id NOT IN (SELECT id FROM tests)', [$limit]);
+    run('DELETE FROM joins WHERE test_id IN (SELECT id FROM tests WHERE created_at < ?) OR test_id NOT IN (SELECT id FROM tests)', [$limit]);
+    $gone = run('DELETE FROM tests WHERE created_at < ?', [$limit]);
+    $pdo->commit();
+    if ($gone > 0) {
+      $pdo->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    }
+  } catch (Throwable $e) {
+    try {
+      if (db()->inTransaction()) {
+        db()->rollBack();
+      }
+    } catch (Throwable $e2) {
+    }
+  }
 }
 
 function one($sql, array $args)
@@ -11242,7 +11336,7 @@ function action_diag()
   if ($d[0] === '') {
     fail('Kein beschreibbarer Datenordner. Bitte beim Webhoster die Schreibrechte prüfen.');
   }
-  out(['ok' => true, 'service' => 'vokabeltest', 'version' => VT_VERSION, 'php' => PHP_VERSION, 'dataInWebroot' => $d[1]]);
+  out(['ok' => true, 'service' => 'vokabeltest', 'version' => VT_VERSION, 'php' => PHP_VERSION, 'dataInWebroot' => $d[1], 'keepDays' => KEEP_DAYS]);
 }
 
 function action_get_test($code)
@@ -11285,7 +11379,8 @@ function action_get_results($testId, $token)
   $st->execute([$row['id']]);
   $joined = array_map(function ($j) { return $j['kennung']; }, $st->fetchAll());
   out(['ok' => true, 'testId' => $row['id'], 'title' => $row['title'], 'status' => $row['status'], 'test' => $test,
-    'roster' => $roster, 'expected' => count($roster), 'submitted' => count($results), 'joined' => $joined, 'results' => $results]);
+    'roster' => $roster, 'expected' => count($roster), 'submitted' => count($results), 'joined' => $joined, 'results' => $results,
+    'keepDays' => KEEP_DAYS, 'deleteAt' => gmdate('Y-m-d\TH:i:s\Z', (int) $row['created_at'] + KEEP_DAYS * 86400)]);
 }
 
 function action_store(array $d)
@@ -11448,9 +11543,11 @@ function action_delete(array $d)
 try {
   if ($method === 'GET') {
     if (isset($_GET['code'])) {
+      tidy();
       action_get_test($_GET['code']);
     }
     if (isset($_GET['state'])) {
+      tidy();
       action_state($_GET['state']);
     }
     action_diag();
@@ -11470,6 +11567,7 @@ try {
     fail('Die Anfrage ist ungültig.');
   }
   $action = field($d, 'action');
+  tidy();
   if ($action === 'ping') {
     db();
     out(['ok' => true, 'version' => VT_VERSION]);
@@ -11542,7 +11640,7 @@ function selfTest(ep, progress) {
   var t0 = Date.now(), token = uid(20), id = 'ST' + uid(6), code = '';
   var test = { id: id, title: 'Selbsttest', items: [{ id: 1, en: 'test', de: 'Test', d: 'de2en' }], transfer: { primary: 'server', fallback: 'airdrop' }, idm: 'nr', roster: [] };
   function step(label, fn) { progress(label); return fn().catch(function (e) { throw new Error(label + ': ' + e.message); }); }
-  return step('Server erreichen', function () { return apiGet(ep, { diag: 1 }).then(function (j) { if (j.service !== 'vokabeltest') throw new Error('Unter dieser Adresse antwortet nicht die api.php des Vokabeltests'); if (!(j.version >= 3)) throw new Error('Die api.php auf dem Server ist veraltet. Bitte die aktuelle herunterladen und die alte damit ersetzen'); }); })
+  return step('Server erreichen', function () { return apiGet(ep, { diag: 1 }).then(function (j) { if (j.service !== 'vokabeltest') throw new Error('Unter dieser Adresse antwortet nicht die api.php des Vokabeltests'); if (!(j.version >= 4)) throw new Error('Die api.php auf dem Server ist veraltet (ohne automatische Löschung nach 90 Tagen). Bitte die aktuelle herunterladen und die alte damit ersetzen'); }); })
     .then(function () { return step('Test speichern', function () { return apiPost(ep, { action: 'store', test: test, token: token }).then(function (j) { code = j.code; }); }); })
     .then(function () { return step('Test per Code laden', function () { return apiGet(ep, { code: code }).then(function (j) { if (!j.test || j.test.id !== id) throw new Error('falscher Test geliefert'); }); }); })
     .then(function () { return step('Abgabe speichern', function () { return apiPost(ep, { action: 'result', testId: id, submissionId: uid(12), kennung: '1', startedAt: new Date().toISOString(), durationSec: 1, auto: 'self', left: [], answers: [{ id: 1, a: 'test' }] }); }); })
@@ -11685,7 +11783,11 @@ function codeEntryHtml() {
     '<button class="btn" id="code-go" type="button">Öffnen</button></div>' +
     '<p id="code-err" class="small s-bad" role="status"></p>' +
     '<p class="small muted codeentry-back"><a href="#">Test anlegen (für Lehrkräfte)</a></p>' +
-    '</div></div>';
+    '</div>' + studentNoteHtml() + '</div>';
+}
+function studentNoteHtml() {
+  return '<div class="student-note"><p><span>Deine Eingaben werden VORkorrigiert.</span> <span>Die Note gibt deine Lehrkraft.</span></p>' +
+    '<p><span>Und dein richtiger Name taucht niemals auf.</span> <span>Das Kürzel wird nach ' + KEEP_DAYS + ' Tagen gelöscht.</span></p></div>';
 }
 function renderCodeEntry() { APP.innerHTML = codeEntryHtml(); bindCodeBar(); }
 function bindCodeBar() {
@@ -12035,7 +12137,7 @@ function renderStart(test) {
       ? '<input type="number" id="s-id" min="1" max="99" inputmode="numeric" autocomplete="off">'
       : '<input type="text" id="s-id" maxlength="' + cfg.len + '" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false">') +
     '<p class="small muted" style="margin-top:1rem">Schreibe die Übersetzung in die Zeile unter jedem Wort. Mehrere Lösungen trennst du mit „/“. Antworten werden auf diesem Gerät zwischengespeichert. Warte nach dem Abgeben auf die Empfangsbestätigung' + (test.time ? '; nach ' + test.time + ' Minuten wird automatisch abgegeben' : '') + (test.watch !== false ? '. Verlässt du die Seite, wird das vermerkt' : '') + '.</p>' +
-    '<div class="row"><button class="btn" id="btn-start">Test starten</button></div><div id="s-err" class="small s-bad"></div></div>';
+    '<div class="row"><button class="btn" id="btn-start">Test starten</button></div><div id="s-err" class="small s-bad"></div></div>' + studentNoteHtml();
   var field = $('#s-id');
   $('#btn-start').addEventListener('click', function () {
     var v = field.value.trim(); if (cfg.upper) v = v.toUpperCase();
@@ -12353,7 +12455,7 @@ function validResult(o){if(!o||typeof o!=='object'||typeof o.testId!=='string'||
 function extractResults(text){var out=[];function add(o){var v=validResult(o);if(v)out.push(v);}text=String(text||'').trim();if(text.length>5000000)return out;try{var j=JSON.parse(text);if(Array.isArray(j))j.slice(0,500).forEach(add);else if(j.kind==='VT_ANSWERS'&&Array.isArray(j.results))j.results.slice(0,500).forEach(add);else add(j);return out;}catch(e){}var m,re=/VT[12]:([A-Za-z0-9_-]{20,})/g;while((m=re.exec(text))){try{add(JSON.parse(b64uDecode(m[1])));}catch(e){}}return out;}
 function gradeSubmission(test,answers){var lookup=Object.create(null);(answers||[]).forEach(function(a){if(a&&typeof a.id==='number'&&!Object.prototype.hasOwnProperty.call(lookup,a.id))lookup[a.id]=String(a.a||'');});var score=0,items=(test.items||[]).map(function(src){var q=src.d==='de2en'?src.de:src.en,key=src.d==='de2en'?src.en:src.de,a=lookup[src.id]||'',g=gradeItem(a,key,test.opts||{},src.d==='de2en'?'en':'de');score+=g.p;return{id:src.id,q:q,key:key,a:a,s:g.s,p:g.p};});return{items:items,score:score,max:items.length||1,percent:Math.round(score/(items.length||1)*1000)/10,wrongText:items.filter(function(x){return x.s!=='ok';}).map(function(x){return x.q+' → '+(x.a||'—')+' (Lösung: '+x.key+')';}).join('; ')};}
 
-function saveReview(id,s){var all=lsGet('vt_review',{});all[id]=s;if(!lsSet('vt_review',all)){alert('Korrekturen konnten nicht gespeichert werden. Bitte Speicher freigeben und erneut versuchen.');return false;}return true;}
+function saveReview(id,s){var all=lsGet('vt_review',{});s.at=Date.now();all[id]=s;if(!lsSet('vt_review',all)){alert('Korrekturen konnten nicht gespeichert werden. Bitte Speicher freigeben und erneut versuchen.');return false;}return true;}
 
 
 /* Verspätung als MM:SS (ab einer Stunde H:MM:SS) */
@@ -12380,7 +12482,7 @@ function reviewTable(rows, t, closedAt) {
 var REVIEW_VIEW = {}, REVIEW_PERSON = {}, REVIEW_SUMMARY_OPEN = {};   // gewählte Ansicht bzw. Person je Test (nur für diese Sitzung)
 function reviewState(id) {
   var s = lsGet('vt_review', {})[id] || {};
-  return { chosen: s.chosen || {}, overrides: s.overrides || {}, rules: s.rules || {}, alternatives: s.alternatives || {}, confirmed: !!s.confirmed };
+  return { chosen: s.chosen || {}, overrides: s.overrides || {}, rules: s.rules || {}, alternatives: s.alternatives || {}, confirmed: !!s.confirmed, at: s.at };
 }
 /* Vergleichsschlüssel einer Antwort – gleiche Schlüssel = gleiche Antwortgruppe */
 function answerKey(a, test, src) {
@@ -12512,6 +12614,9 @@ function renderReview(box, test, raw, entry) {
   var closedAt = entry && entry.closedAt, confirmed = r.confirmed && !open;
   var leftSum = rows.reduce(function (s, x) { return s + (x.leftCount || 0); }, 0), lateN = rows.filter(function (x) { return x.late; }).length;
   var foreign = test.roster && test.roster.length ? rows.filter(function (x) { return test.roster.indexOf(x.kennung) < 0; }).length : 0;
+  var exp = expiresAt(test), srv = LIVE && LIVE.testId === test.id ? LIVE.data : null;
+  var keepNote = !exp ? '' : srv && !srv.deleteAt ? ' Automatische Löschung nach ' + KEEP_DAYS + ' Tagen erst nach Update der api.php (Einrichtung).'
+    : ' Automatische Löschung am ' + fmtDate(srv && srv.deleteAt ? srv.deleteAt : new Date(exp).toISOString()) + ' – PDF vorher sichern.';
   var meta = [rows.length + ' Personen' + (test.roster && test.roster.length ? ' / ' + test.roster.length : ''), 'Notendurchschnitt ' + String(Math.round(avg * 10) / 10).replace('.', ',')];
   if (open) meta.push(open + (open === 1 ? ' Grenzfall' : ' Grenzfälle') + ' offen');
   if (leftSum) meta.push(leftSum + (leftSum === 1 ? ' Unterbrechung' : ' Unterbrechungen'));
@@ -12529,9 +12634,9 @@ function renderReview(box, test, raw, entry) {
     '<div class="seg" role="group" aria-label="Ansicht"><button type="button" data-view="vocab" aria-pressed="' + (view === 'vocab') + '">Nach Vokabel</button><button type="button" data-view="person" aria-pressed="' + (view === 'person') + '">Nach Person</button></div>' +
     '<div id="review-view"></div>' +
     '<div class="toolbar"><button class="btn sec sm" id="review-pdf" type="button">Nur PDF</button><button class="btn sec sm" id="review-copy" type="button">Nur Notenliste kopieren</button>' + (confirmed ? '<button class="btn sec sm" id="review-unconfirm" type="button">Prüfstatus zurücksetzen</button>' : '') + '</div>' +
-    '<p class="small muted">PDFs enthalten Leistungsdaten. Jeder Bogen beginnt auf einer neuen Seite. Die Vokabeln erscheinen in der ursprünglichen Listenreihenfolge.</p>' +
+    '<p class="small muted">PDFs enthalten Leistungsdaten. Jeder Bogen beginnt auf einer neuen Seite. Die Vokabeln erscheinen in der ursprünglichen Listenreihenfolge.' + keepNote + '</p>' +
     gradeTable(test) + '<div id="review-hardest"></div>' +
-    (entry && entry.test.ep ? '<details class="more"><summary>Test auf dem Server löschen</summary><p class="small">Löscht den Test und seine Antworten vom Server. Lokale Kopien und exportierte Dateien bleiben bestehen. Aufbewahrungsvorgaben beachten.</p><button class="btn danger sm" id="remote-delete">Vom Server löschen</button><p id="remote-status" role="status"></p></details>' : '');
+    (entry && entry.test.ep ? '<details class="more"><summary>Test auf dem Server löschen</summary><p class="small">Löscht den Test und seine Antworten sofort vom Server, nicht erst nach ' + KEEP_DAYS + ' Tagen. Lokale Kopien und exportierte Dateien bleiben bestehen. Aufbewahrungsvorgaben beachten.</p><button class="btn danger sm" id="remote-delete">Vom Server löschen</button><p id="remote-status" role="status"></p></details>' : '');
   var viewBox = $('#review-view', box);
   function rerender(anchorId, focusNext) {
     var a = anchorId && document.getElementById(anchorId), y = a ? a.getBoundingClientRect().top : null;
@@ -12647,6 +12752,8 @@ function stopScanner(){scanEpoch++;if(scanTick)clearInterval(scanTick);scanTick=
 /* Live-Ansicht während des Tests: Punkte und Noten zuerst, dann wer fehlt, Auffälligkeiten, schwierige Vokabeln */
 function drawLiveMissing(box, l) {
   if (!box) return;
+  var exp = l && l.entry && expiresAt(l.entry.test), gone = exp && Date.now() > exp;
+  if (gone) { stopPoll(); box.innerHTML = '<h1>Live-Auswertung</h1><div class="notice info">Dieser Test wurde ' + KEEP_DAYS + ' Tage nach dem Anlegen automatisch gelöscht – auf dem Server und auf diesem Gerät.</div>'; return; }
   box.innerHTML = '<h1>Live-Auswertung</h1><div class="notice err">' + esc(l && l.err ? l.err : 'Keine Daten.') + '</div><div class="row"><button class="btn sec sm" id="live-retry" type="button">Erneut versuchen</button></div>';
   $('#live-retry').addEventListener('click', fetchLive);
 }
@@ -12715,8 +12822,49 @@ function drawLive(){var l=LIVE,box=$('#live');if(!l||!l.data||!l.data.test||!box
  var stamp=JSON.stringify(raw);if(l.reviewStamp===stamp&&$('#live-review')){$('#live-sync').textContent=l.err?'Aktualisierung fehlgeschlagen: '+l.err:'Stand '+new Date().toLocaleTimeString('de-DE')+' · spätere Abgaben werden weiter erfasst.';return;}l.reviewStamp=stamp;
  box.innerHTML=nav('')+'<p class="eyebrow">Live-Auswertung</p><p class="small muted" id="live-sync" role="status">'+(imp.saved?'Abgaben lokal gesichert.':'Achtung: lokales Speichern fehlgeschlagen. Nicht schließen; Speicher freigeben.')+'</p><div class="toolbar"><button class="btn sec sm" id="live-refresh">Aktualisieren</button><a href="#a">Weitere Antworten einlesen</a><button class="btn sec sm" id="live-reopen">Test wieder öffnen</button></div><section class="card" id="live-review"></section>';renderReview($('#live-review'),test,imp.saved?raw:remote,entry);$('#live-refresh').onclick=fetchLive;$('#live-reopen').onclick=function(){if(!confirm('Test für weitere reguläre Abgaben öffnen?'))return;apiPost(l.ep,{action:'close',testId:l.testId,token:l.token,open:true}).then(function(){if(l.entry){delete l.entry.closedAt;saveEntry(l.entry);}l.reviewStamp=null;fetchLive();}).catch(function(e){alert(e.message);});};
 };
+/* Lokale Kopien mit Leistungsdaten nach KEEP_DAYS Tagen entfernen – auf Schüler-iPads wie auf dem Gerät der Lehrkraft.
+   Maßgeblich ist das Anlegedatum des Tests; ist es unbekannt, das Datum der Abgabe, des Testbeginns oder der letzten Korrektur. */
+function expiresAt(test) { var t = Date.parse(test && test.created); return isNaN(t) ? null : t + KEEP_MS; }
+function purgeOld() {
+  var now = Date.now(), created = Object.create(null);
+  function ms(v) { return typeof v === 'number' ? v : Date.parse(v); }
+  function tooOld(testId, when) { var t = created[testId]; if (t == null) t = ms(when); return !isNaN(t) && now - t > KEEP_MS; }
+  try {
+    var tests = lsGet(LS.tests, []), ch = false;
+    if (Array.isArray(tests)) {
+      tests.forEach(function (e) { var t = e ? Date.parse(e.created || (e.test && e.test.created)) : NaN; if (!isNaN(t)) created[e.id] = t; });
+      tests.forEach(function (e) {
+        if (e && tooOld(e.id) && ((e.roster && e.roster.length) || (e.test && e.test.roster && e.test.roster.length))) { e.roster = []; if (e.test) e.test.roster = []; ch = true; }
+      });
+      if (ch) lsSet(LS.tests, tests);
+    }
+    var res = lsGet(LS.results, null);
+    if (Array.isArray(res)) { var keep = res.filter(function (x) { return !(x && tooOld(x.testId, x.submittedAt)); }); if (keep.length !== res.length) lsSet(LS.results, keep); }
+    var rv = lsGet('vt_review', null);
+    if (rv && typeof rv === 'object') {
+      ch = false;
+      Object.keys(rv).forEach(function (id) {
+        var s = rv[id];
+        if (!s || tooOld(id, s.at)) { delete rv[id]; ch = true; }
+        else if (created[id] == null && s.at == null) { s.at = now; ch = true; }
+      });
+      if (ch) lsSet('vt_review', rv);
+    }
+    Object.keys(localStorage).forEach(function (k) {
+      var v;
+      if (k.indexOf('vt_pending_') === 0) {
+        v = lsGet(k, null);
+        if (!v || tooOld(v.test && v.test.id, (v.test && v.test.created) || (v.payload && v.payload.submittedAt))) localStorage.removeItem(k);
+      } else if (k.indexOf('vt_run_') === 0) {
+        v = lsGet(k, null);
+        if (!v || tooOld(k.slice(7), v.startedAt)) localStorage.removeItem(k);
+      }
+    });
+  } catch (e) {}
+}
 function boot() {
   APP = document.getElementById('app');
+  purgeOld();
   stopScanner(); stopPoll();
   var h = location.hash.replace(/^#/, '');
   if (h === 'settings') { renderSettings(); return; }
