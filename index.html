@@ -10585,7 +10585,8 @@ var LOGO_URI = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCA
 var POLL_MS = 10000;
 
 var LS = { ep: 'vt_endpoint', tests: 'vt_tests', teacher: 'vt_teacher', results: 'vt_results' };
-/* Aufbewahrung: Server (api.php) und Geräte löschen Tests samt Antworten 90 Tage nach dem Anlegen. */
+/* Aufbewahrung: Der Server (api.php) löscht Tests samt Antworten 90 Tage nach dem Anlegen,
+   jedes Gerät seine Kopien 90 Tage nach dem ersten Kontakt (Einzelheiten bei purgeOld). */
 var KEEP_DAYS = 90, KEEP_MS = KEEP_DAYS * 864e5;
 var APP = null;
 var timer = null;
@@ -10761,18 +10762,16 @@ function pdfTable(doc, t) {
     t.cols.forEach(function (c, i) { doc.text(c.align === 'center' ? cx + widths[i] / 2 - 3 : cx, top + t.pad * 0.6, c.title, t.head, { bold: true, gray: 0.27, align: c.align === 'center' ? 'center' : 'left' }); cx += widths[i]; });
     top += t.head * 1.25 + t.pad; doc.line(x, top, x + cw, top, 1.1, 0.13);
   }
-  if (!t.measureOnly) header(); else top += t.head * 1.25 + t.pad;
+  header();
   t.rows.forEach(function (row, ri) {
     var cells = row.map(cellLines), n = Math.max.apply(null, cells.map(function (l) { return l.length; })), h = n * lh + 2 * t.pad;
-    if (!t.measureOnly && (t.breaks ? t.breaks[ri] : top + h > t.limit)) { top = t.newPage(); header(); }
-    if (!t.measureOnly) {
-      var cx = x;
-      cells.forEach(function (lines, i) {
-        lines.forEach(function (ln, k) { doc.text(t.cols[i].align === 'center' ? cx + widths[i] / 2 - 3 : cx, top + t.pad + k * lh, ln, t.size, { align: t.cols[i].align === 'center' ? 'center' : 'left' }); });
-        cx += widths[i];
-      });
-      doc.line(x, top + h, x + cw, top + h, 0.5, 0.8);
-    }
+    if (t.breaks ? t.breaks[ri] : top + h > t.limit) { top = t.newPage(); header(); }
+    var cx = x;
+    cells.forEach(function (lines, i) {
+      lines.forEach(function (ln, k) { doc.text(t.cols[i].align === 'center' ? cx + widths[i] / 2 - 3 : cx, top + t.pad + k * lh, ln, t.size, { align: t.cols[i].align === 'center' ? 'center' : 'left' }); });
+      cx += widths[i];
+    });
+    doc.line(x, top + h, x + cw, top + h, 0.5, 0.8);
     top += h;
   });
   return top;
@@ -10835,7 +10834,9 @@ function pdfReport(test, rows, confirmed, closedAt) {
       t += 20; doc.text(L, t, who, 13, { bold: true }); return t + 13 * 1.3 + 12;
     }
     var cols = [{ title: 'Vokabel', frac: 0.34 }, { title: 'Deine Antwort', frac: 0.28 }, { title: 'Punkte', frac: 0.1, align: 'center' }, { title: 'richtig wäre gewesen', frac: 0.28 }];
-    var data = r.items.map(function (it) { return [it.q, it.a || '—', pts(it.p), it.p === 1 ? '' : it.key]; });
+    // Zellen wie auf dem Server höchstens 200 Zeichen – so passt jede Zeile sicher auf eine Seite
+    var cell = function (s) { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > 200 ? s.slice(0, 199) + '…' : s; };
+    var data = r.items.map(function (it) { return [cell(it.q), it.a ? cell(it.a) : '—', pts(it.p), it.p === 1 ? '' : cell(it.key)]; });
     top = head();
     var first = top;
     // Seitenplan für eine Schriftgröße: wo die Tabelle umbricht und wie viele Seiten der Bogen braucht.
@@ -10849,7 +10850,10 @@ function pdfReport(test, rows, confirmed, closedAt) {
       }
       if (cur + SCORE_BLOCK > SIGN) {
         pages++;
-        if (n - start >= 2) breaks[n - Math.min(3, n - start - 1)] = true;
+        // bis zu drei Zeilen mitnehmen – nur so viele, wie zusammen mit dem Punkteblock auf die neue Seite passen
+        var k = Math.min(3, n - start - 1), moved = function (c) { var h = 0; for (var j = n - c; j < n; j++) h += m.rows[j]; return h; };
+        while (k > 1 && CONT_TOP + m.head + moved(k) + SCORE_BLOCK > SIGN) k--;
+        if (k >= 1) breaks[n - k] = true;
       }
       return { scale: sc, pages: pages, breaks: breaks };
     }
@@ -11175,7 +11179,8 @@ function db()
 }
 
 /* Löscht Tests samt Antworten KEEP_DAYS Tage nach dem Anlegen – höchstens einmal pro Stunde geprüft.
-   Läuft bei jeder Anfrage mit; ein Fehler hier hält die eigentliche Anfrage nie auf. */
+   Läuft bei Testabruf, Statusabfrage und jeder POST-Anfrage mit, nicht beim Selbsttest (?diag).
+   Ein Fehler hier hält die eigentliche Anfrage nie auf. */
 function tidy()
 {
   try {
@@ -11787,7 +11792,7 @@ function codeEntryHtml() {
 }
 function studentNoteHtml() {
   return '<div class="student-note"><p><span>Deine Eingaben werden VORkorrigiert.</span> <span>Die Note gibt deine Lehrkraft.</span></p>' +
-    '<p><span>Und dein richtiger Name taucht niemals auf.</span> <span>Das Kürzel wird nach ' + KEEP_DAYS + ' Tagen gelöscht.</span></p></div>';
+    '<p><span>Dein Name wird nicht abgefragt –</span> <span>nur dein Kürzel.</span> <span>Das Kürzel wird nach ' + KEEP_DAYS + ' Tagen gelöscht.</span></p></div>';
 }
 function renderCodeEntry() { APP.innerHTML = codeEntryHtml(); bindCodeBar(); }
 function bindCodeBar() {
@@ -12077,7 +12082,8 @@ function bootStudent(params) {
   }
   load.then(function (test) {
     if (!test || !test.items || !test.items.length || !test.items[0].id) throw new Error('Der Test ist unvollständig oder stammt aus einer älteren Version');
-    if (lsGet('vt_done_' + test.id, null) || ssGet('vt_done_' + test.id)) { renderError('Dieser Test wurde in diesem Fenster bereits abgegeben. Bei einer versehentlichen Abgabe bitte die Lehrkraft informieren.'); return; }
+    var doneMark = lsGet('vt_done_' + test.id, null) || ssGet('vt_done_' + test.id);
+    if (doneMark) { renderError('Dieser Test wurde ' + (doneMark === 2 ? 'in einem anderen Fenster' : 'in diesem Fenster') + ' bereits abgegeben. Bei einer versehentlichen Abgabe bitte die Lehrkraft informieren.'); return; }
     var pending=lsGet(pendingKey(test),null); if(pending){renderDone(pending.test,pending.payload,pending.local);return;} var run = getRun(test);
     if (run && run.session && run.answers) { renderTest(test, run, true); return; }
     renderStart(test);
@@ -12229,10 +12235,17 @@ function fetchLive() {
   if (l.busy) { l.again = true; return; }   // läuft schon eine Abfrage: danach sofort noch eine
   l.busy = true; l.again = false;
   apiPost(l.ep, { action: 'results', testId: l.testId, token: l.token }).then(function (j) {
-    l.err = ''; l.fails = 0; l.lastOk = Date.now(); l.data = j;
+    l.err = ''; l.fails = 0; l.lastOk = Date.now(); l.data = j; l.gone = false;
     if (j.status === 'closed') l.closing = false;
     drawLive();
-  }).catch(function (e) { l.err = e.message; l.fails = (l.fails || 0) + 1; drawLive(); })
+  }).catch(function (e) {
+    l.err = e.message; l.fails = (l.fails || 0) + 1;
+    // Der Server selbst meldet den Test als unbekannt, und die 90 Tage sind um: automatisch gelöscht
+    var exp = l.entry && (localExpiry(l.testId) || expiresAt(l.entry.test));
+    l.gone = /^Kein Zugriff auf diesen Test/.test(e.message) && !!exp && Date.now() > exp;
+    if (l.gone) l.data = null;
+    drawLive();
+  })
     .then(function () { l.busy = false; if (l.again) { l.again = false; fetchLive(); } });
 }
 function liveTest() { var l = LIVE; return (l.data && l.data.test) || (l.entry && l.entry.test) || null; }
@@ -12266,7 +12279,10 @@ function importResults(list) {
     if (store.some(function (s) { return (s.submissionId ? s.testId + '|' + s.submissionId : s.testId + '|' + s.kennung + '|' + s.submittedAt) === key; })) { dup++; return; }
     store.push(r); added++;
   });
-  return { added: added, dup: dup, saved: lsSet(LS.results, store) };
+  var saved = lsSet(LS.results, store);
+  // Frist für neu eingelesene Antworten sofort festhalten, nicht erst beim nächsten Seitenstart
+  if (saved && added) saved = purgeOld(true) !== false;
+  return { added: added, dup: dup, saved: saved };
 }
 function importStatus(s, note) {
   var text = s.added + ' Ergebnis' + (s.added === 1 ? '' : 'se') + ' eingelesen' + (s.dup ? ', ' + s.dup + ' bereits vorhanden' : '') + (note || '') + '.';
@@ -12425,25 +12441,28 @@ function renderSettings() {
     '<section class="card"><details><summary>Datenschutz &amp; lokale Daten</summary><p class="small">Ergebnisse bleiben bis zur Löschung auf diesem Gerät beziehungsweise auf deinem Server. QR-Verarbeitung und Auswertung erfolgen hier im Browser. Es werden keine externen Schriftarten, QR-Dienste oder Analysewerkzeuge geladen.</p><p class="small muted">Auf dem Server werden Kennung, Antworten, Bearbeitungsdauer, Zeitpunkt und gegebenenfalls Unterbrechungen gespeichert. Beim Laden einer gehosteten Seite können beim Betreiber Verbindungsdaten anfallen. Den schulischen Datenschutzhinweis vor dem Einsatz bereitstellen.</p><button class="btn sec sm" id="local-clear">Lokale Tool-Daten löschen</button><p class="small muted">Daten auf dem Server und heruntergeladene Dateien bleiben dabei erhalten. Tests auf dem Server lassen sich in ihrer Auswertung löschen.</p></details></section>';
   bindSetup();
  $('#backup-all').onclick=function(){download('vokabeltest_sicherung.json',JSON.stringify({kind:'VT_BACKUP',version:5,tests:lsGet(LS.tests,[]),results:lsGet(LS.results,[]),reviews:lsGet('vt_review',{})},null,2));};
- $('#restore-file').onchange=async function(e){try{var o=JSON.parse(await e.target.files[0].text());if(o.kind!=='VT_BACKUP'||!Array.isArray(o.tests))throw Error('Keine Lehrkraft-Sicherung.');var tests=lsGet(LS.tests,[]),n=0;o.tests.forEach(function(t){if(!t||!t.test||!Array.isArray(t.test.items)||!t.id)return;if(!tests.some(function(x){return x.id===t.id;})){tests.push(t);n++;}});if(!lsSet(LS.tests,tests))throw Error('Nicht genügend Gerätespeicher.');var imp=importResults((o.results||[]).map(validResult).filter(Boolean));var r=lsGet('vt_review',{});Object.keys(o.reviews||{}).forEach(function(k){if(!r[k])r[k]=o.reviews[k];});if(!lsSet('vt_review',r)||!imp.saved)throw Error('Nicht alle Daten konnten gespeichert werden.');$('#restore-status').textContent=n+' Tests ergänzt. Vorhandene Tests und Korrekturen bleiben unverändert.';}catch(err){$('#restore-status').textContent=err.message;}e.target.value='';};
+ $('#restore-file').onchange=async function(e){try{var o=JSON.parse(await e.target.files[0].text());if(o.kind!=='VT_BACKUP'||!Array.isArray(o.tests))throw Error('Keine Lehrkraft-Sicherung.');var tests=lsGet(LS.tests,[]),n=0;o.tests.forEach(function(t){if(!t||!t.test||!Array.isArray(t.test.items)||!t.id)return;if(!tests.some(function(x){return x.id===t.id;})){tests.push(t);n++;}});if(!lsSet(LS.tests,tests))throw Error('Nicht genügend Gerätespeicher.');var imp=importResults((o.results||[]).map(validResult).filter(Boolean));var r=lsGet('vt_review',{});Object.keys(o.reviews||{}).forEach(function(k){if(!r[k])r[k]=o.reviews[k];});if(!lsSet('vt_review',r)||!imp.saved)throw Error('Nicht alle Daten konnten gespeichert werden.');purgeOld(true);$('#restore-status').textContent=n+' Tests ergänzt. Vorhandene Tests und Korrekturen bleiben unverändert.';}catch(err){$('#restore-status').textContent=err.message;}e.target.value='';};
  $('#local-clear').onclick=function(){if(!confirm('Alle lokalen Tests, Zugänge, Antworten und Korrekturen dieses Tools löschen? Vorher eine Sicherung herunterladen.'))return;Object.keys(localStorage).filter(function(k){return k.indexOf('vt_')===0;}).forEach(function(k){localStorage.removeItem(k);});Object.keys(sessionStorage).filter(function(k){return k.indexOf('vt_')===0;}).forEach(function(k){sessionStorage.removeItem(k);});location.hash='';};
 }
 function saveRun(test,run){if(test.preview)return true;var ok=lsSet(runKey(test),run);ssSet(runKey(test),run);return ok;}
 function getRun(test){return lsGet(runKey(test),null)||ssGet(runKey(test));}
 function pendingKey(t){return 'vt_pending_'+t.id;}
+/* Empfangene Abgaben merken – nur die zufällige Abgabe-ID, kein Kürzel, keine Antworten. Ein anderer Tab desselben
+   Geräts nimmt einen Zwischenstand dieser Abgabe dann nicht wieder auf; neue Abgaben anderer bleiben möglich. */
+function markSent(id){if(typeof id!=='string'||!id)return;var s=lsGet('vt_sent',null);if(!s||typeof s!=='object'||Array.isArray(s))s={};s[id]=Date.now();lsSet('vt_sent',s);}
 
 
 function submit(test,run,mode,state){var btn=$('#btn-submit');if(!btn||btn.disabled)return;var values=$$('.ans input').map(function(i){return i.value;}),empty=values.filter(function(a){return !a.trim();}).length;if(!mode&&empty&&!confirm(empty+' Felder sind noch leer. Trotzdem abgeben?'))return;if(state.visHandler)document.removeEventListener('visibilitychange',state.visHandler);btn.disabled=true;state.done=true;if(timer){clearInterval(timer);timer=null;}if(wakeLock){wakeLock.release().catch(function(){});wakeLock=null;}var answers=run.session.map(function(it,i){return {id:it.id,a:String(values[i]||'').trim()};});var payload={action:'result',v:5,testId:test.id,submissionId:run.submissionId,kennung:run.kennung,startedAt:run.startedAt,submittedAt:new Date().toISOString(),durationSec:Math.round((Date.now()-Date.parse(run.startedAt))/1000),auto:mode,left:run.left,answers:answers};var local={v:5,testId:test.id,submissionId:run.submissionId,title:test.title,kennung:run.kennung,idm:idmOf(test),submittedAt:payload.submittedAt,startedAt:run.startedAt,durationSec:payload.durationSec,auto:mode,leftCount:run.left.length,leftText:run.left.length?run.left.length+' Unterbrechung(en)':'',answers:answers};if(test.preview){APP.innerHTML='<div class="card"><p class="eyebrow">Vorschau beendet</p><h1>So sieht die Abgabe aus.</h1><p>Im echten Test folgt jetzt: '+studentMethod(transportOf(test).primary)+'. Diese Vorschau hat keine Antworten übertragen.</p><button class="btn sec" onclick="window.close()">Vorschau schließen</button></div>';return;}var saved=lsSet(pendingKey(test),{test:test,payload:payload,local:local,sent:false});renderDone(test,payload,local);if(!saved)$('#send').insertAdjacentHTML('beforeend','<p><b>Gerätespeicher nicht verfügbar. Jetzt die Antwortdatei herunterladen und dieses Fenster geöffnet lassen.</b></p>');}
 function resultText(test,local){return 'VT2:'+b64uEncode(JSON.stringify(local));}
 function renderDone(test,payload,local){var tr=transportOf(test),pending=lsGet(pendingKey(test),null),sent=!!(pending&&pending.sent);APP.classList.toggle('sent-ok',sent);APP.innerHTML='<p class="eyebrow">'+esc(test.title)+'</p><h1>Antworten gesichert.</h1><p class="muted">Kennung '+esc(local.kennung)+' · '+local.answers.length+' Antworten</p><div id="send" class="notice '+(sent?'good':'info')+'" role="status">'+(sent?'Empfang bestätigt. Du kannst das Fenster schließen.':'Bitte jetzt übergeben. Bis dahin bleiben die Antworten auf diesem Gerät.')+'</div><section class="card" id="delivery"><div id="method-ui"></div><details id="fallback-panel"><summary>Übertragung klappt nicht?</summary><p class="small muted">Wechsle zum vereinbarten Ersatzweg. Bereits eingegangene Abgaben werden anhand ihrer Abgabe-ID erkannt.</p><button class="btn sec" id="fallback-button">'+studentMethod(tr.fallback)+'</button></details></section><div class="row"><button class="btn sec sm" id="download-answer">Antwortdatei sichern</button><button class="btn sec sm" id="copy-answer">Antwortdaten kopieren</button></div><details class="more" id="local-data"><summary>Empfang und lokale Daten</summary><p class="small">Bei AirDrop oder QR lasse dir den Eingang von der Lehrkraft bestätigen. Danach kannst du die lokalen Antworten löschen. Heruntergeladene Dateien bleiben erhalten.</p><button class="btn sec sm" id="clear-answer">Empfang bestätigt – lokale Antworten löschen</button></details><div id="provisional"></div>';
- $('#download-answer').onclick=function(){download('vokabeltest_'+test.id+'_'+local.kennung+'.json',JSON.stringify(local));};$('#copy-answer').onclick=function(e){copyText(resultText(test,local),e.currentTarget);};$('#clear-answer').onclick=function(){if(!confirm('Hat die Lehrkraft den Eingang bestätigt? Danach sind die Antworten auf diesem Gerät nicht mehr wiederherstellbar.'))return;try{localStorage.removeItem(pendingKey(test));localStorage.removeItem(runKey(test));ssDel(runKey(test));ssSet('vt_done_'+test.id,1);}catch(e){}APP.innerHTML='<h1>Fertig.</h1><p>Lokale Antworten gelöscht.</p>';};
+ $('#download-answer').onclick=function(){download('vokabeltest_'+test.id+'_'+local.kennung+'.json',JSON.stringify(local));};$('#copy-answer').onclick=function(e){copyText(resultText(test,local),e.currentTarget);};$('#clear-answer').onclick=function(){if(!confirm('Hat die Lehrkraft den Eingang bestätigt? Danach sind die Antworten auf diesem Gerät nicht mehr wiederherstellbar.'))return;markSent(local.submissionId);try{localStorage.removeItem(pendingKey(test));localStorage.removeItem(runKey(test));ssDel(runKey(test));ssSet('vt_done_'+test.id,1);}catch(e){}APP.innerHTML='<h1>Fertig.</h1><p>Lokale Antworten gelöscht.</p>';};
  $('#fallback-button').onclick=function(){showMethod(tr.fallback);};
  function showMethod(m){var next=m===tr.primary?tr.fallback:tr.primary;$('#fallback-button').textContent=studentMethod(next)+'';$('#fallback-button').onclick=function(){showMethod(next);};$('#fallback-panel').open=false;var box=$('#method-ui');box.innerHTML='<h2 style="margin-top:0">'+studentMethod(m)+'</h2><p class="small muted">'+(m==='server'?'Antworten direkt an die Lehrkraft senden.':m==='airdrop'?'Öffne das Teilen-Menü, wähle AirDrop und das Gerät deiner Lehrkraft.':'Zeige diesen Code deiner Lehrkraft. Sie scannt ihn in „Empfangen“.')+'</p>';
  if(m==='server'){box.insertAdjacentHTML('beforeend','<button class="btn" id="send-server">'+(sent?'Erneut bestätigen':'Jetzt senden')+'</button>');$('#send-server').onclick=sendServer;if(!sent)sendServer();}
  if(m==='airdrop'){box.insertAdjacentHTML('beforeend','<div class="row"><button class="btn" id="share-answer">AirDrop / Teilen öffnen</button></div><p id="share-status" class="small" role="status"></p>');$('#share-answer').onclick=function(){shareAnswer(local,test);};}
  if(m==='qr'){box.insertAdjacentHTML('beforeend','<div id="qr-result"></div><div id="qr-controls" class="row"></div><p class="small muted">Bei mehreren Teilen erst weiterschalten, wenn der Empfang angezeigt wird.</p>');showAnswerQR(local);}
  }
- function sendServer(){var b=$('#send-server');if(b)b.disabled=true;if(!test.ep){$('#send').className='notice err';$('#send').textContent='Für diesen Test ist kein Server hinterlegt. Bitte den Ersatzweg verwenden.';$('#fallback-panel').open=true;if(b)b.disabled=false;return;}$('#send').textContent='Übertragung läuft. Antworten bleiben gespeichert.';apiRetry(test.ep,payload,1).then(function(j){sent=true;try{localStorage.removeItem(pendingKey(test));localStorage.removeItem(runKey(test));}catch(e){}ssDel(runKey(test));ssSet('vt_done_'+test.id,1);$('#send').className='notice good';APP.classList.add('sent-ok');$('#send').textContent='Empfang bestätigt.'+(j.late?' Eingang nach Testende – die Lehrkraft entscheidet über die Wertung.':' Du kannst das Fenster schließen.');if(b){b.disabled=false;b.textContent='Empfang erneut prüfen';}}).catch(function(e){$('#send').className='notice err';$('#send').textContent='Keine Empfangsbestätigung. Deine Antworten bleiben gespeichert. '+e.message;$('#fallback-panel').open=true;if(b)b.disabled=false;});}
+ function sendServer(){var b=$('#send-server');if(b)b.disabled=true;if(!test.ep){$('#send').className='notice err';$('#send').textContent='Für diesen Test ist kein Server hinterlegt. Bitte den Ersatzweg verwenden.';$('#fallback-panel').open=true;if(b)b.disabled=false;return;}$('#send').textContent='Übertragung läuft. Antworten bleiben gespeichert.';apiRetry(test.ep,payload,1).then(function(j){sent=true;markSent(payload.submissionId);try{localStorage.removeItem(pendingKey(test));localStorage.removeItem(runKey(test));}catch(e){}ssDel(runKey(test));ssSet('vt_done_'+test.id,1);$('#send').className='notice good';APP.classList.add('sent-ok');$('#send').textContent='Empfang bestätigt.'+(j.late?' Eingang nach Testende – die Lehrkraft entscheidet über die Wertung.':' Du kannst das Fenster schließen.');if(b){b.disabled=false;b.textContent='Empfang erneut prüfen';}}).catch(function(e){$('#send').className='notice err';$('#send').textContent='Keine Empfangsbestätigung. Deine Antworten bleiben gespeichert. '+e.message;$('#fallback-panel').open=true;if(b)b.disabled=false;});}
  showMethod(sent?'server':tr.primary);
  if(test.show==='full'){var g=gradeSubmission(test,local.answers);$('#provisional').innerHTML='<details class="more"><summary>Vorläufiges Ergebnis</summary><p class="big">'+pts(g.score)+' / '+g.max+'</p><p>'+gradeText(g.score,g.max,test)+'</p><p class="small muted">Die Lehrkraft prüft abweichende Antworten. Punkte und Note können sich noch ändern.</p>'+g.items.map(function(it){return '<p class="small">'+esc(it.q)+': '+esc(it.a||'—')+' · '+(it.s==='ok'?'richtig':'prüfen · '+esc(it.key))+'</p>';}).join('')+'</details>';}
 }
@@ -12615,9 +12634,13 @@ function renderReview(box, test, raw, entry) {
   var leftSum = rows.reduce(function (s, x) { return s + (x.leftCount || 0); }, 0), lateN = rows.filter(function (x) { return x.late; }).length;
   var foreign = test.roster && test.roster.length ? rows.filter(function (x) { return test.roster.indexOf(x.kennung) < 0; }).length : 0;
   var srv = LIVE && LIVE.testId === test.id ? LIVE.data : null;
-  var until = srv && srv.deleteAt ? Date.parse(srv.deleteAt) : (localExpiry(test.id) || expiresAt(test));
-  var keepNote = srv && !srv.deleteAt ? ' Automatische Löschung nach ' + KEEP_DAYS + ' Tagen erst nach Update der api.php (Einrichtung).'
-    : until && !isNaN(until) ? ' Automatische Löschung am ' + fmtDate(new Date(until).toISOString()) + ' – PDF vorher sichern.' : '';
+  // Löschdatum je Speicherort: Server laut api.php, dieses Gerät nach seiner eigenen Frist
+  var day = function (t) { return t && !isNaN(t) ? fmtDate(new Date(t).toISOString()) : ''; };
+  var onDev = day(localExpiry(test.id) || expiresAt(test)), onSrv = srv && srv.deleteAt ? day(Date.parse(srv.deleteAt)) : '';
+  var keepNote = srv && !srv.deleteAt ? ' Automatische Löschung ' + (onDev ? 'auf diesem Gerät am ' + onDev + ', ' : '') + 'auf dem Server erst nach Update der api.php (Einrichtung).'
+    : onSrv && onDev && onSrv !== onDev ? ' Automatische Löschung auf dem Server am ' + onSrv + ', auf diesem Gerät am ' + onDev + ' – PDF vorher sichern.'
+    : onSrv ? ' Automatische Löschung auf dem Server' + (onDev ? ' und diesem Gerät' : '') + ' am ' + onSrv + ' – PDF vorher sichern.'
+    : onDev ? ' Automatische Löschung auf diesem Gerät am ' + onDev + ' – PDF vorher sichern.' : '';
   var meta = [rows.length + ' Personen' + (test.roster && test.roster.length ? ' / ' + test.roster.length : ''), 'Notendurchschnitt ' + String(Math.round(avg * 10) / 10).replace('.', ',')];
   if (open) meta.push(open + (open === 1 ? ' Grenzfall' : ' Grenzfälle') + ' offen');
   if (leftSum) meta.push(leftSum + (leftSum === 1 ? ' Unterbrechung' : ' Unterbrechungen'));
@@ -12753,8 +12776,7 @@ function stopScanner(){scanEpoch++;if(scanTick)clearInterval(scanTick);scanTick=
 /* Live-Ansicht während des Tests: Punkte und Noten zuerst, dann wer fehlt, Auffälligkeiten, schwierige Vokabeln */
 function drawLiveMissing(box, l) {
   if (!box) return;
-  var exp = l && l.entry && (localExpiry(l.testId) || expiresAt(l.entry.test)), gone = exp && Date.now() > exp;
-  if (gone) { stopPoll(); box.innerHTML = '<h1>Live-Auswertung</h1><div class="notice info">Dieser Test wurde ' + KEEP_DAYS + ' Tage nach dem Anlegen automatisch gelöscht – auf dem Server und auf diesem Gerät.</div>'; return; }
+  if (l && l.gone) { stopPoll(); box.innerHTML = '<h1>Live-Auswertung</h1><div class="notice info">Dieser Test wurde ' + KEEP_DAYS + ' Tage nach dem Anlegen automatisch gelöscht – auf dem Server und auf diesem Gerät.</div>'; return; }
   box.innerHTML = '<h1>Live-Auswertung</h1><div class="notice err">' + esc(l && l.err ? l.err : 'Keine Daten.') + '</div><div class="row"><button class="btn sec sm" id="live-retry" type="button">Erneut versuchen</button></div>';
   $('#live-retry').addEventListener('click', fetchLive);
 }
@@ -12825,19 +12847,27 @@ function drawLive(){var l=LIVE,box=$('#live');if(!l||!l.data||!l.data.test||!box
 };
 /* Lokale Kopien mit Leistungsdaten nach KEEP_DAYS Tagen entfernen – auf Schüler-iPads wie auf dem Gerät der Lehrkraft.
    Auf Schüler-iPads bleiben ohnehin nur Abgaben, die den Server nicht erreicht haben (für den Ersatzweg).
-   Jedes Gerät rechnet nur mit seiner eigenen Uhr: Je Test merkt es sich in vt_seen, seit wann es Daten dazu hat –
-   das Anlegen, die Abgabe oder den Testbeginn auf diesem Gerät, sonst den Moment, in dem es die Daten zuerst sieht.
-   Was das Tool nicht sicher lesen kann, bleibt unangetastet: Andere Tools unter derselben Adresse teilen den Speicher. */
+   Gerechnet wird mit der Uhr dieses Geräts: Je Test merkt es sich in vt_seen, seit wann es Daten dazu hat –
+   das Anlegen (bei eingelesenen Sicherungen das ursprüngliche Anlegedatum), die Abgabe oder den Testbeginn,
+   sonst den Moment, in dem es die Daten zuerst sieht. Zwischenstände im Sitzungsspeicher des offenen Tabs zählen mit.
+   Was das Tool nicht sicher lesen kann, bleibt unangetastet: Andere Tools unter derselben Adresse teilen den Speicher.
+   onlyStamp: nur die Fristen festhalten (nach dem Einlesen), nichts löschen. false = Frist ließ sich nicht speichern. */
 function expiresAt(test) { var t = Date.parse(test && test.created); return isNaN(t) ? null : t + KEEP_MS; }
 function localExpiry(id) { var s = lsGet('vt_seen', null); return s && typeof s[id] === 'number' ? s[id] + KEEP_MS : null; }
-function purgeOld() {
+function purgeOld(onlyStamp) {
   var now = Date.now();
   function own(v) { var t = typeof v === 'number' ? v : Date.parse(v); return !isNaN(t) && t <= now && now - t < 400 * 864e5 ? t : null; }
   try {
-    var seen = lsGet('vt_seen', null), had = JSON.stringify(seen), items = [];
+    var seen = lsGet('vt_seen', null), had = JSON.stringify(seen), items = [], sItems = [];
     if (!seen || typeof seen !== 'object' || Array.isArray(seen)) seen = {};
+    // Stand die Uhr beim Merken weit vor (später korrigiert), zählt die Frist ab jetzt – sonst bliebe alles entsprechend länger
+    Object.keys(seen).forEach(function (id) { if (typeof seen[id] === 'number' && seen[id] > now + 864e5) seen[id] = now; });
+    var sent = lsGet('vt_sent', null), rawSent = localStorage.getItem('vt_sent');
+    if (!sent || typeof sent !== 'object' || Array.isArray(sent)) sent = {};
     var stamp = function (id, t) { if (typeof id === 'string' && id && typeof seen[id] !== 'number') seen[id] = t != null ? t : now; };
     var old = function (id) { return typeof id === 'string' && typeof seen[id] === 'number' && now - seen[id] > KEEP_MS; };
+    // Zwischenstand einer Abgabe, deren Empfang schon bestätigt ist – etwa aus einem zweiten Tab
+    var done = function (v) { return !onlyStamp && v && typeof v.submissionId === 'string' && typeof sent[v.submissionId] === 'number'; };
     var tests = lsGet(LS.tests, null), res = lsGet(LS.results, null), rv = lsGet('vt_review', null);
     if (!rv || typeof rv !== 'object' || Array.isArray(rv)) rv = null;
     if (Array.isArray(tests)) tests.forEach(function (e) { if (e) stamp(e.id, own(e.created)); });
@@ -12846,34 +12876,55 @@ function purgeOld() {
       if (k.indexOf('vt_pending_') === 0) {
         v = lsGet(k, null); id = k.slice(11);
         // Vom Server bestätigte Abgaben (ältere Fassung) braucht das Gerät nicht mehr
-        if (v && v.payload && v.sent === true) localStorage.removeItem(k);
+        if (!onlyStamp && v && v.payload && v.sent === true) localStorage.removeItem(k);
         else if (v && v.payload) { stamp(id, own(v.payload.submittedAt)); items.push([k, id]); }
       }
-      else if (k.indexOf('vt_run_') === 0) { v = lsGet(k, null); id = k.slice(7); if (v && v.startedAt) { stamp(id, own(v.startedAt)); items.push([k, id]); } }
+      else if (k.indexOf('vt_run_') === 0) {
+        v = lsGet(k, null); id = k.slice(7);
+        if (done(v)) localStorage.removeItem(k);
+        else if (v && v.startedAt) { stamp(id, own(v.startedAt)); items.push([k, id]); }
+      }
       // dauerhafte Merker „bereits abgegeben“ der älteren Fassung: gelten jetzt nur noch im offenen Tab
-      else if (k.indexOf('vt_done_') === 0 && localStorage.getItem(k) === '1') localStorage.removeItem(k);
+      else if (!onlyStamp && k.indexOf('vt_done_') === 0 && localStorage.getItem(k) === '1') localStorage.removeItem(k);
     });
+    // Zwischenstände im Sitzungsspeicher dieses Tabs: dieselbe Frist. Ist die Abgabe in einem anderen Tab
+    // angekommen, gilt sie hier als abgegeben und wird nicht wieder aufgenommen.
+    try {
+      Object.keys(sessionStorage).forEach(function (k) {
+        if (k.indexOf('vt_run_') !== 0) return;
+        var v = ssGet(k), id = k.slice(7);
+        if (done(v)) { sessionStorage.removeItem(k); if (!ssGet('vt_done_' + id)) ssSet('vt_done_' + id, 2); }
+        else if (v && v.startedAt) { stamp(id, own(v.startedAt)); sItems.push([k, id]); }
+      });
+    } catch (e) {}
     if (Array.isArray(res)) res.forEach(function (x) { if (x) stamp(x.testId, null); });
     if (rv) Object.keys(rv).forEach(function (id) { stamp(id, null); });
-    // Alte Daten entfernen. Tests bleiben als Vorlage in der Liste, aber ohne Kennungsliste.
-    var ch = false;
-    if (Array.isArray(tests)) {
-      tests.forEach(function (e) {
-        if (e && old(e.id) && ((e.roster && e.roster.length) || (e.test && e.test.roster && e.test.roster.length))) { e.roster = []; if (e.test) e.test.roster = []; ch = true; }
-      });
-      if (ch) lsSet(LS.tests, tests);
+    if (!onlyStamp) {
+      // Alte Daten entfernen. Tests bleiben als Vorlage in der Liste, aber ohne Kennungsliste.
+      var ch = false;
+      if (Array.isArray(tests)) {
+        tests.forEach(function (e) {
+          if (e && old(e.id) && ((e.roster && e.roster.length) || (e.test && e.test.roster && e.test.roster.length))) { e.roster = []; if (e.test) e.test.roster = []; ch = true; }
+        });
+        if (ch) lsSet(LS.tests, tests);
+      }
+      if (Array.isArray(res)) { var keep = res.filter(function (x) { return !(x && old(x.testId)); }); if (keep.length !== res.length) lsSet(LS.results, keep); res = keep; }
+      if (rv) { ch = false; Object.keys(rv).forEach(function (id) { if (old(id)) { delete rv[id]; ch = true; } }); if (ch) lsSet('vt_review', rv); }
+      items.forEach(function (it) { if (old(it[1])) localStorage.removeItem(it[0]); });
+      sItems.forEach(function (it) { if (old(it[1])) ssDel(it[0]); });
+      // Merkliste empfangener Abgaben nach KEEP_DAYS Tagen vergessen
+      Object.keys(sent).forEach(function (sid) { var t = sent[sid]; if (typeof t !== 'number' || t > now) sent[sid] = now; else if (now - t > KEEP_MS) delete sent[sid]; });
+      var sentJson = Object.keys(sent).length ? JSON.stringify(sent) : null;
+      if (sentJson !== rawSent) { if (sentJson) lsSet('vt_sent', sent); else localStorage.removeItem('vt_sent'); }
     }
-    if (Array.isArray(res)) { var keep = res.filter(function (x) { return !(x && old(x.testId)); }); if (keep.length !== res.length) lsSet(LS.results, keep); res = keep; }
-    if (rv) { ch = false; Object.keys(rv).forEach(function (id) { if (old(id)) { delete rv[id]; ch = true; } }); if (ch) lsSet('vt_review', rv); }
-    items.forEach(function (it) { if (old(it[1])) localStorage.removeItem(it[0]); });
     // Merkliste klein halten: nur Tests, zu denen es auf diesem Gerät noch etwas gibt
     var still = Object.create(null), mark = function (id) { if (typeof id === 'string') still[id] = true; };
     if (Array.isArray(tests)) tests.forEach(function (e) { if (e) mark(e.id); });
     if (Array.isArray(res)) res.forEach(function (x) { if (x) mark(x.testId); });
     if (rv) Object.keys(rv).forEach(mark);
-    items.forEach(function (it) { if (!old(it[1])) mark(it[1]); });
+    items.concat(sItems).forEach(function (it) { if (onlyStamp || !old(it[1])) mark(it[1]); });
     Object.keys(seen).forEach(function (id) { if (!still[id]) delete seen[id]; });
-    if (JSON.stringify(seen) !== had) lsSet('vt_seen', seen);
+    return JSON.stringify(seen) === had || lsSet('vt_seen', seen);
   } catch (e) {}
 }
 function boot() {
