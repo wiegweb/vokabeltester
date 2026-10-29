@@ -11196,7 +11196,7 @@ function tidy()
     $gone = run('DELETE FROM tests WHERE created_at < ?', [$limit]);
     $pdo->commit();
     if ($gone > 0) {
-      $pdo->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      $pdo->exec('PRAGMA wal_checkpoint(PASSIVE)');
     }
   } catch (Throwable $e) {
     try {
@@ -12455,7 +12455,7 @@ function validResult(o){if(!o||typeof o!=='object'||typeof o.testId!=='string'||
 function extractResults(text){var out=[];function add(o){var v=validResult(o);if(v)out.push(v);}text=String(text||'').trim();if(text.length>5000000)return out;try{var j=JSON.parse(text);if(Array.isArray(j))j.slice(0,500).forEach(add);else if(j.kind==='VT_ANSWERS'&&Array.isArray(j.results))j.results.slice(0,500).forEach(add);else add(j);return out;}catch(e){}var m,re=/VT[12]:([A-Za-z0-9_-]{20,})/g;while((m=re.exec(text))){try{add(JSON.parse(b64uDecode(m[1])));}catch(e){}}return out;}
 function gradeSubmission(test,answers){var lookup=Object.create(null);(answers||[]).forEach(function(a){if(a&&typeof a.id==='number'&&!Object.prototype.hasOwnProperty.call(lookup,a.id))lookup[a.id]=String(a.a||'');});var score=0,items=(test.items||[]).map(function(src){var q=src.d==='de2en'?src.de:src.en,key=src.d==='de2en'?src.en:src.de,a=lookup[src.id]||'',g=gradeItem(a,key,test.opts||{},src.d==='de2en'?'en':'de');score+=g.p;return{id:src.id,q:q,key:key,a:a,s:g.s,p:g.p};});return{items:items,score:score,max:items.length||1,percent:Math.round(score/(items.length||1)*1000)/10,wrongText:items.filter(function(x){return x.s!=='ok';}).map(function(x){return x.q+' → '+(x.a||'—')+' (Lösung: '+x.key+')';}).join('; ')};}
 
-function saveReview(id,s){var all=lsGet('vt_review',{});s.at=Date.now();all[id]=s;if(!lsSet('vt_review',all)){alert('Korrekturen konnten nicht gespeichert werden. Bitte Speicher freigeben und erneut versuchen.');return false;}return true;}
+function saveReview(id,s){var all=lsGet('vt_review',{});all[id]=s;if(!lsSet('vt_review',all)){alert('Korrekturen konnten nicht gespeichert werden. Bitte Speicher freigeben und erneut versuchen.');return false;}return true;}
 
 
 /* Verspätung als MM:SS (ab einer Stunde H:MM:SS) */
@@ -12482,7 +12482,7 @@ function reviewTable(rows, t, closedAt) {
 var REVIEW_VIEW = {}, REVIEW_PERSON = {}, REVIEW_SUMMARY_OPEN = {};   // gewählte Ansicht bzw. Person je Test (nur für diese Sitzung)
 function reviewState(id) {
   var s = lsGet('vt_review', {})[id] || {};
-  return { chosen: s.chosen || {}, overrides: s.overrides || {}, rules: s.rules || {}, alternatives: s.alternatives || {}, confirmed: !!s.confirmed, at: s.at };
+  return { chosen: s.chosen || {}, overrides: s.overrides || {}, rules: s.rules || {}, alternatives: s.alternatives || {}, confirmed: !!s.confirmed };
 }
 /* Vergleichsschlüssel einer Antwort – gleiche Schlüssel = gleiche Antwortgruppe */
 function answerKey(a, test, src) {
@@ -12614,9 +12614,10 @@ function renderReview(box, test, raw, entry) {
   var closedAt = entry && entry.closedAt, confirmed = r.confirmed && !open;
   var leftSum = rows.reduce(function (s, x) { return s + (x.leftCount || 0); }, 0), lateN = rows.filter(function (x) { return x.late; }).length;
   var foreign = test.roster && test.roster.length ? rows.filter(function (x) { return test.roster.indexOf(x.kennung) < 0; }).length : 0;
-  var exp = expiresAt(test), srv = LIVE && LIVE.testId === test.id ? LIVE.data : null;
-  var keepNote = !exp ? '' : srv && !srv.deleteAt ? ' Automatische Löschung nach ' + KEEP_DAYS + ' Tagen erst nach Update der api.php (Einrichtung).'
-    : ' Automatische Löschung am ' + fmtDate(srv && srv.deleteAt ? srv.deleteAt : new Date(exp).toISOString()) + ' – PDF vorher sichern.';
+  var srv = LIVE && LIVE.testId === test.id ? LIVE.data : null;
+  var until = srv && srv.deleteAt ? Date.parse(srv.deleteAt) : (localExpiry(test.id) || expiresAt(test));
+  var keepNote = srv && !srv.deleteAt ? ' Automatische Löschung nach ' + KEEP_DAYS + ' Tagen erst nach Update der api.php (Einrichtung).'
+    : until && !isNaN(until) ? ' Automatische Löschung am ' + fmtDate(new Date(until).toISOString()) + ' – PDF vorher sichern.' : '';
   var meta = [rows.length + ' Personen' + (test.roster && test.roster.length ? ' / ' + test.roster.length : ''), 'Notendurchschnitt ' + String(Math.round(avg * 10) / 10).replace('.', ',')];
   if (open) meta.push(open + (open === 1 ? ' Grenzfall' : ' Grenzfälle') + ' offen');
   if (leftSum) meta.push(leftSum + (leftSum === 1 ? ' Unterbrechung' : ' Unterbrechungen'));
@@ -12752,7 +12753,7 @@ function stopScanner(){scanEpoch++;if(scanTick)clearInterval(scanTick);scanTick=
 /* Live-Ansicht während des Tests: Punkte und Noten zuerst, dann wer fehlt, Auffälligkeiten, schwierige Vokabeln */
 function drawLiveMissing(box, l) {
   if (!box) return;
-  var exp = l && l.entry && expiresAt(l.entry.test), gone = exp && Date.now() > exp;
+  var exp = l && l.entry && (localExpiry(l.testId) || expiresAt(l.entry.test)), gone = exp && Date.now() > exp;
   if (gone) { stopPoll(); box.innerHTML = '<h1>Live-Auswertung</h1><div class="notice info">Dieser Test wurde ' + KEEP_DAYS + ' Tage nach dem Anlegen automatisch gelöscht – auf dem Server und auf diesem Gerät.</div>'; return; }
   box.innerHTML = '<h1>Live-Auswertung</h1><div class="notice err">' + esc(l && l.err ? l.err : 'Keine Daten.') + '</div><div class="row"><button class="btn sec sm" id="live-retry" type="button">Erneut versuchen</button></div>';
   $('#live-retry').addEventListener('click', fetchLive);
@@ -12823,43 +12824,48 @@ function drawLive(){var l=LIVE,box=$('#live');if(!l||!l.data||!l.data.test||!box
  box.innerHTML=nav('')+'<p class="eyebrow">Live-Auswertung</p><p class="small muted" id="live-sync" role="status">'+(imp.saved?'Abgaben lokal gesichert.':'Achtung: lokales Speichern fehlgeschlagen. Nicht schließen; Speicher freigeben.')+'</p><div class="toolbar"><button class="btn sec sm" id="live-refresh">Aktualisieren</button><a href="#a">Weitere Antworten einlesen</a><button class="btn sec sm" id="live-reopen">Test wieder öffnen</button></div><section class="card" id="live-review"></section>';renderReview($('#live-review'),test,imp.saved?raw:remote,entry);$('#live-refresh').onclick=fetchLive;$('#live-reopen').onclick=function(){if(!confirm('Test für weitere reguläre Abgaben öffnen?'))return;apiPost(l.ep,{action:'close',testId:l.testId,token:l.token,open:true}).then(function(){if(l.entry){delete l.entry.closedAt;saveEntry(l.entry);}l.reviewStamp=null;fetchLive();}).catch(function(e){alert(e.message);});};
 };
 /* Lokale Kopien mit Leistungsdaten nach KEEP_DAYS Tagen entfernen – auf Schüler-iPads wie auf dem Gerät der Lehrkraft.
-   Maßgeblich ist das Anlegedatum des Tests; ist es unbekannt, das Datum der Abgabe, des Testbeginns oder der letzten Korrektur. */
+   Jedes Gerät rechnet nur mit seiner eigenen Uhr: Je Test merkt es sich in vt_seen, seit wann es Daten dazu hat –
+   das Anlegen, die Abgabe oder den Testbeginn auf diesem Gerät, sonst den Moment, in dem es die Daten zuerst sieht.
+   Was das Tool nicht sicher lesen kann, bleibt unangetastet: Andere Tools unter derselben Adresse teilen den Speicher. */
 function expiresAt(test) { var t = Date.parse(test && test.created); return isNaN(t) ? null : t + KEEP_MS; }
+function localExpiry(id) { var s = lsGet('vt_seen', null); return s && typeof s[id] === 'number' ? s[id] + KEEP_MS : null; }
 function purgeOld() {
-  var now = Date.now(), created = Object.create(null);
-  function ms(v) { return typeof v === 'number' ? v : Date.parse(v); }
-  function tooOld(testId, when) { var t = created[testId]; if (t == null) t = ms(when); return !isNaN(t) && now - t > KEEP_MS; }
+  var now = Date.now();
+  function own(v) { var t = typeof v === 'number' ? v : Date.parse(v); return !isNaN(t) && t <= now && now - t < 400 * 864e5 ? t : null; }
   try {
-    var tests = lsGet(LS.tests, []), ch = false;
+    var seen = lsGet('vt_seen', null), had = JSON.stringify(seen), items = [];
+    if (!seen || typeof seen !== 'object' || Array.isArray(seen)) seen = {};
+    var stamp = function (id, t) { if (typeof id === 'string' && id && typeof seen[id] !== 'number') seen[id] = t != null ? t : now; };
+    var old = function (id) { return typeof id === 'string' && typeof seen[id] === 'number' && now - seen[id] > KEEP_MS; };
+    var tests = lsGet(LS.tests, null), res = lsGet(LS.results, null), rv = lsGet('vt_review', null);
+    if (!rv || typeof rv !== 'object' || Array.isArray(rv)) rv = null;
+    if (Array.isArray(tests)) tests.forEach(function (e) { if (e) stamp(e.id, own(e.created)); });
+    Object.keys(localStorage).forEach(function (k) {
+      var v, id;
+      if (k.indexOf('vt_pending_') === 0) { v = lsGet(k, null); id = k.slice(11); if (v && v.payload) { stamp(id, own(v.payload.submittedAt)); items.push([k, id]); } }
+      else if (k.indexOf('vt_run_') === 0) { v = lsGet(k, null); id = k.slice(7); if (v && v.startedAt) { stamp(id, own(v.startedAt)); items.push([k, id]); } }
+    });
+    if (Array.isArray(res)) res.forEach(function (x) { if (x) stamp(x.testId, null); });
+    if (rv) Object.keys(rv).forEach(function (id) { stamp(id, null); });
+    // Alte Daten entfernen. Tests bleiben als Vorlage in der Liste, aber ohne Kennungsliste.
+    var ch = false;
     if (Array.isArray(tests)) {
-      tests.forEach(function (e) { var t = e ? Date.parse(e.created || (e.test && e.test.created)) : NaN; if (!isNaN(t)) created[e.id] = t; });
       tests.forEach(function (e) {
-        if (e && tooOld(e.id) && ((e.roster && e.roster.length) || (e.test && e.test.roster && e.test.roster.length))) { e.roster = []; if (e.test) e.test.roster = []; ch = true; }
+        if (e && old(e.id) && ((e.roster && e.roster.length) || (e.test && e.test.roster && e.test.roster.length))) { e.roster = []; if (e.test) e.test.roster = []; ch = true; }
       });
       if (ch) lsSet(LS.tests, tests);
     }
-    var res = lsGet(LS.results, null);
-    if (Array.isArray(res)) { var keep = res.filter(function (x) { return !(x && tooOld(x.testId, x.submittedAt)); }); if (keep.length !== res.length) lsSet(LS.results, keep); }
-    var rv = lsGet('vt_review', null);
-    if (rv && typeof rv === 'object') {
-      ch = false;
-      Object.keys(rv).forEach(function (id) {
-        var s = rv[id];
-        if (!s || tooOld(id, s.at)) { delete rv[id]; ch = true; }
-        else if (created[id] == null && s.at == null) { s.at = now; ch = true; }
-      });
-      if (ch) lsSet('vt_review', rv);
-    }
-    Object.keys(localStorage).forEach(function (k) {
-      var v;
-      if (k.indexOf('vt_pending_') === 0) {
-        v = lsGet(k, null);
-        if (!v || tooOld(v.test && v.test.id, (v.test && v.test.created) || (v.payload && v.payload.submittedAt))) localStorage.removeItem(k);
-      } else if (k.indexOf('vt_run_') === 0) {
-        v = lsGet(k, null);
-        if (!v || tooOld(k.slice(7), v.startedAt)) localStorage.removeItem(k);
-      }
-    });
+    if (Array.isArray(res)) { var keep = res.filter(function (x) { return !(x && old(x.testId)); }); if (keep.length !== res.length) lsSet(LS.results, keep); res = keep; }
+    if (rv) { ch = false; Object.keys(rv).forEach(function (id) { if (old(id)) { delete rv[id]; ch = true; } }); if (ch) lsSet('vt_review', rv); }
+    items.forEach(function (it) { if (old(it[1])) localStorage.removeItem(it[0]); });
+    // Merkliste klein halten: nur Tests, zu denen es auf diesem Gerät noch etwas gibt
+    var still = Object.create(null), mark = function (id) { if (typeof id === 'string') still[id] = true; };
+    if (Array.isArray(tests)) tests.forEach(function (e) { if (e) mark(e.id); });
+    if (Array.isArray(res)) res.forEach(function (x) { if (x) mark(x.testId); });
+    if (rv) Object.keys(rv).forEach(mark);
+    items.forEach(function (it) { if (!old(it[1])) mark(it[1]); });
+    Object.keys(seen).forEach(function (id) { if (!still[id]) delete seen[id]; });
+    if (JSON.stringify(seen) !== had) lsSet('vt_seen', seen);
   } catch (e) {}
 }
 function boot() {
